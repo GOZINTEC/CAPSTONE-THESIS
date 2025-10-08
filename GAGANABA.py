@@ -373,7 +373,7 @@ class CTBoneSegmentation:
 
                         #voxelize
                 try:
-                    voxel = pv_mesh.voxelize(density=1.0)
+                    voxel = pv_mesh.voxelize(voxel_size=1.0)
                     voxel_surface = voxel.extract_surface().triangulate().clean(tolerance=1e-3)
                     log_message("Voxel remeshing completed successfully")
                        
@@ -423,8 +423,11 @@ class CTBoneSegmentation:
                 # Try a stronger repair pipeline
                 try:
                     trimesh.repair.fix_normals(tri)
-                    trimesh.repair.fill_holes(tri, max_hole_area=500)
-                    trimesh.repair.fix_windings(tri)
+                    trimesh.repair.fill_holes(tri)
+                    trimesh.repair.fix_inversion(tri)
+                    trimesh.repair.broken_faces(tri)
+                    #trimesh.repair.remove_degenerate_faces(tri)
+                    #trimesh.repair.fill_small_boundaries(tri)
 
                 except Exception as e:
                     log_message(f"MESH REPAIR SKIPPED DUE TO ERROR: {e}")
