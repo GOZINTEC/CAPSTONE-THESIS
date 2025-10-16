@@ -3,6 +3,9 @@ CT Bone Segmentation Tool
 Processes DICOM CT scans, segments bones based on Hounsfield unit ranges,
 and exports the result as a 3D STL file.
 """
+"" READ: next revisions na need: migrate whole GUI from tkinter into PYQT, then create scaffold generators using pygalmesh, implicit, pymesh, trimesh,
+starting with pymesh na may boolean operation, visualize whole thing using vedo""
+
 
 import os
 import sys
@@ -491,3 +494,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
