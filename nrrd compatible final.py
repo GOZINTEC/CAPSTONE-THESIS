@@ -6,6 +6,8 @@ and exports the result as a 3D STL file.
 "" READ: next revisions na need: migrate whole GUI from tkinter into PYQT, then create scaffold generators using pygalmesh, implicit, pymesh, trimesh,
 starting with pymesh na may boolean operation, visualize whole thing using vedo""
 
+""IMPORTANT: next na need for scaffolding: functions to cut a small portion of the bone na iinscriban ng scaffold, as much as possible, user defined""
+
 
 import os
 import sys
@@ -494,4 +496,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
