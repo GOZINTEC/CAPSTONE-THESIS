@@ -17,6 +17,13 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 import pyvista as pv
 import trimesh
 
+# VTK/Qt interactor for embedded 3D viewing
+from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
+from vtkmodules.vtkRenderingCore import vtkRenderer, vtkPolyDataMapper, vtkActor
+from vtkmodules.vtkCommonDataModel import vtkPolyData, vtkCellArray
+from vtkmodules.vtkCommonCore import vtkPoints
+from vtkmodules.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
+
 from PyQt5.QtCore import QThread, pyqtSignal, QObject
 from PyQt5.QtWidgets import (
     QApplication,
@@ -270,6 +277,125 @@ class ExportWorker(QObject):
             self.error.emit(f"STL export failed: {exc}")
 
 
+class MeshPreviewWorker(QObject):
+    finished = pyqtSignal(object, object)  # vertices (Nx3 float), faces (Mx3 int)
+    error = pyqtSignal(str)
+    message = pyqtSignal(str)
+
+    def __init__(
+        self,
+        segmented_data: np.ndarray,
+        volume_type: str,
+        dicom_files: List[str],
+        nrrd_header: Optional[Dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.segmented_data = segmented_data
+        self.volume_type = volume_type
+        self.dicom_files = dicom_files
+        self.nrrd_header = nrrd_header
+
+    def run(self) -> None:
+        try:
+            self.message.emit("Extracting 3D surface for preview...")
+            # Determine spacing to keep aspect ratio correct
+            if self.volume_type == "nrrd" and self.nrrd_header is not None:
+                space_dirs = self.nrrd_header.get(
+                    "space directions", [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+                )
+                spacing = [float(np.linalg.norm(np.array(space_dirs[i]))) for i in range(3)]
+            elif self.volume_type == "dicom" and self.dicom_files:
+                ds0 = pydicom.dcmread(self.dicom_files[0])
+                ps = getattr(ds0, "PixelSpacing", [1.0, 1.0])
+                st = getattr(ds0, "SliceThickness", 1.0)
+                spacing = [float(st), float(ps[1]), float(ps[0])]
+            else:
+                spacing = [1.0, 1.0, 1.0]
+
+            # Marching cubes to get a surface
+            verts, faces, _, _ = measure.marching_cubes(
+                self.segmented_data, level=0.5, spacing=spacing
+            )
+
+            # Optional light cleanup via PyVista for nicer preview
+            try:
+                faces_with_counts = np.hstack([np.full((faces.shape[0], 1), 3), faces]).astype(np.int64)
+                pv_mesh = pv.PolyData(verts, faces_with_counts.ravel())
+                pv_mesh = pv_mesh.extract_surface().triangulate().clean(tolerance=1e-3)
+                # Keep triangle faces
+                faces = pv_mesh.faces.reshape(-1, 4)[:, 1:].astype(np.int64)
+                verts = pv_mesh.points.astype(np.float32)
+            except Exception:
+                pass
+
+            self.finished.emit(verts, faces)
+        except Exception as exc:
+            self.error.emit(f"3D preview failed: {exc}")
+
+
+class VTKViewer(QWidget):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.vtk_widget = QVTKRenderWindowInteractor(self)
+        layout.addWidget(self.vtk_widget)
+
+        self.renderer = vtkRenderer()
+        self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
+        # Initialize interactor without blocking the Qt loop
+        try:
+            self.vtk_widget.Initialize()
+        except Exception:
+            # Some environments initialize automatically
+            pass
+
+        self.actor: Optional[vtkActor] = None
+
+    def clear(self) -> None:
+        if self.actor is not None:
+            try:
+                self.renderer.RemoveActor(self.actor)
+            except Exception:
+                pass
+            self.actor = None
+        self.vtk_widget.GetRenderWindow().Render()
+
+    def set_mesh(self, vertices: np.ndarray, faces: np.ndarray) -> None:
+        # Build vtkPolyData from numpy arrays
+        points = vtkPoints()
+        points.SetData(numpy_to_vtk(vertices.astype(np.float32), deep=True))
+
+        num_faces = faces.shape[0]
+        faces_with_counts = np.hstack([
+            np.full((num_faces, 1), 3, dtype=np.int64),
+            faces.astype(np.int64),
+        ]).ravel()
+        vtk_ids = numpy_to_vtkIdTypeArray(faces_with_counts, deep=True)
+        cells = vtkCellArray()
+        cells.SetCells(num_faces, vtk_ids)
+
+        poly = vtkPolyData()
+        poly.SetPoints(points)
+        poly.SetPolys(cells)
+
+        mapper = vtkPolyDataMapper()
+        mapper.SetInputData(poly)
+
+        actor = vtkActor()
+        actor.SetMapper(mapper)
+
+        # Replace any existing actor
+        if self.actor is not None:
+            try:
+                self.renderer.RemoveActor(self.actor)
+            except Exception:
+                pass
+        self.actor = actor
+        self.renderer.AddActor(actor)
+        self.renderer.ResetCamera()
+        self.vtk_widget.GetRenderWindow().Render()
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -343,9 +469,12 @@ class MainWindow(QMainWindow):
         self.btn_segment.clicked.connect(self.segment_bones)
         self.btn_export = QPushButton("Export STL")
         self.btn_export.clicked.connect(self.export_stl)
+        self.btn_preview3d = QPushButton("Preview 3D")
+        self.btn_preview3d.clicked.connect(self.preview_3d)
         hl.addWidget(self.btn_load)
         hl.addWidget(self.btn_segment)
         hl.addWidget(self.btn_export)
+        hl.addWidget(self.btn_preview3d)
         return box
 
     def _build_viz_group(self) -> QGroupBox:
@@ -354,11 +483,14 @@ class MainWindow(QMainWindow):
         self.fig = Figure(figsize=(10, 7), dpi=100)
         self.canvas = FigureCanvas(self.fig)
         vbl.addWidget(self.canvas)
+        # Embedded 3D viewer (VTK)
+        self.vtk_viewer = VTKViewer()
+        vbl.addWidget(self.vtk_viewer, stretch=1)
         return box
 
     # --- Helpers ---
     def set_busy(self, busy: bool, message: Optional[str] = None) -> None:
-        for btn in (self.btn_dicom, self.btn_nrrd, self.btn_load, self.btn_segment, self.btn_export, self.btn_preview):
+        for btn in (self.btn_dicom, self.btn_nrrd, self.btn_load, self.btn_segment, self.btn_export, self.btn_preview, self.btn_preview3d):
             btn.setEnabled(not busy)
         if busy:
             self.progress.setRange(0, 0)
@@ -520,6 +652,46 @@ class MainWindow(QMainWindow):
         self.exp_worker.finished.connect(self.exp_worker.deleteLater)
         self.exp_thread.finished.connect(self.exp_thread.deleteLater)
         self.exp_thread.start()
+
+    def preview_3d(self) -> None:
+        if self.segmented_data is None:
+            self.error_dialog("Error", "Please segment bones first")
+            return
+        if self.volume_type is None:
+            self.error_dialog("Error", "Volume type unknown; load data first")
+            return
+        self.set_busy(True, "Preparing 3D preview...")
+
+        self.mesh_thread = QThread()
+        self.mesh_worker = MeshPreviewWorker(
+            segmented_data=self.segmented_data,  # type: ignore[arg-type]
+            volume_type=self.volume_type,
+            dicom_files=self.dicom_files,
+            nrrd_header=self.nrrd_header,
+        )
+        self.mesh_worker.moveToThread(self.mesh_thread)
+        self.mesh_thread.started.connect(self.mesh_worker.run)
+        self.mesh_worker.message.connect(self.info)
+        self.mesh_worker.error.connect(self._on_mesh_error)
+        self.mesh_worker.finished.connect(self._on_mesh_finished)
+        self.mesh_worker.finished.connect(self.mesh_thread.quit)
+        self.mesh_worker.finished.connect(self.mesh_worker.deleteLater)
+        self.mesh_thread.finished.connect(self.mesh_thread.deleteLater)
+        self.mesh_thread.start()
+
+    def _on_mesh_error(self, text: str) -> None:
+        self.set_busy(False)
+        self.error_dialog("Error", text)
+
+    def _on_mesh_finished(self, vertices: object, faces: object) -> None:
+        try:
+            verts_arr = np.asarray(vertices, dtype=np.float32)
+            faces_arr = np.asarray(faces, dtype=np.int64)
+            self.vtk_viewer.set_mesh(verts_arr, faces_arr)
+            self.set_busy(False, "3D preview ready. Use mouse to rotate/zoom/pan")
+        except Exception as exc:
+            self.set_busy(False)
+            self.error_dialog("Error", f"Failed to render 3D preview: {exc}")
 
     def _on_export_error(self, text: str) -> None:
         self.set_busy(False)
