@@ -6,3 +6,7 @@ vtk>=9.0.0
 numpy-stl>=2.16.0
 matplotlib>=3.5.0
 Pillow>=8.3.0
+PyQt5>=5.15.9
+pyvista>=0.44.0
+trimesh>=4.0.0
+pynrrd>=1.0.0
