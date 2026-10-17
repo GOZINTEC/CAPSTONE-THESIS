@@ -618,6 +618,8 @@ class SliceViewWidget(QWidget):
 
     def set_volume(self, vol):
         self.volume_data = vol
+        if self.mask_data is not None and (vol is None or self.mask_data.shape != vol.shape):
+            self.mask_data = None
         if vol is not None:
             self._recompute_max()
             self.slice_index = min(self.slice_index, self.max_index)
@@ -689,7 +691,7 @@ class SliceViewWidget(QWidget):
 
         # Mask overlay
         msl = self._extract_mask_slice()
-        if msl is not None and self.show_mask:
+        if msl is not None and self.show_mask and msl.shape == gray.shape:
             where = msl > 0
             if np.any(where):
                 a = self.mask_opacity / 255.0
@@ -1839,10 +1841,10 @@ class MainWindow(QMainWindow):
         self.cur_y = shape[1] // 2
         self.cur_x = shape[2] // 2
 
-        # Push volume to views
+        # Push volume to views (clear old masks first to prevent dimension mismatch)
         for v in (self.view_axial, self.view_coronal, self.view_sagittal):
-            v.set_volume(vol)
             v.set_mask(None)
+            v.set_volume(vol)
 
         # Configure slider ranges
         self.vp_axial.update_range(shape[0] - 1)
